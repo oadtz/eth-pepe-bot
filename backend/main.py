@@ -201,17 +201,28 @@ async def initialize_live_trading():
     """Initialize live trading components."""
     global risk_manager, live_trader, current_session
     
+    # Wait for Web3 to be connected (with retry)
+    max_retries = 10
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        if get_w3() and get_w3().is_connected():
+            break
+        logger.info(f"Waiting for Web3 connection... (attempt {retry_count + 1}/{max_retries})")
+        await asyncio.sleep(3)
+        retry_count += 1
+    
+    if not get_w3() or not get_w3().is_connected():
+        logger.error("Web3 not connected after retries - cannot initialize live trading")
+        return False
+    
     try:
-        if not get_w3() or not get_w3().is_connected():
-            logger.error("Web3 not connected - cannot initialize live trading")
-            return False
-        
         # Initialize risk manager
         risk_manager = RiskManager()
         risk_manager.live_trading_enabled = True  # Set to True since we're initializing live trading
         
         # Initialize live trader
-        live_trader = LiveTrader(get_w3(), risk_manager)
+        live_trader = LiveTrader(risk_manager)
         
         # Create trading session
         db = SessionLocal()
