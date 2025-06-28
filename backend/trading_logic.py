@@ -1,15 +1,17 @@
-import httpx
-import pandas as pd
-import asyncio 
-from web3 import Web3
 import logging
-import random # For synthetic data generation
-
+import asyncio
+import time
+import random
+import pandas as pd
+from typing import Tuple
+from web3 import Web3
+from eth_account import Account
+from datetime import datetime, timedelta
 from config import (
-    WEB3_PROVIDER_URL,
-    PEPE_WETH_POOL_ADDRESS,
-    WETH_ADDRESS,
+    WALLET_ADDRESS,
+    PRIVATE_KEY,
     PEPE_ADDRESS,
+    WETH_ADDRESS,
     UNISWAP_ROUTER_ADDRESS,
     SHORT_SMA_WINDOW,
     LONG_SMA_WINDOW,
@@ -17,22 +19,22 @@ from config import (
     RSI_OVERSOLD,
     RSI_OVERBOUGHT,
     NUM_HOURS_DATA,
-    WALLET_ADDRESS # For balance checks
+    PEPE_WETH_POOL_ADDRESS,
+    PEPE_WETH_POOL_1PERCENT,
+    PEPE_WETH_POOL_005PERCENT
 )
+from rpc_rotation import get_web3_with_rotation, execute_rpc_call
 
-# Configure logging
 logger = logging.getLogger(__name__)
 
-# Web3 setup (initialize w3 globally, but contracts only when w3 is connected)
-w3 = None
-try:
-    w3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER_URL))
-    if not w3.is_connected():
-        logger.error("Web3 is not connected to Ethereum node. Check WEB3_PROVIDER_URL in .env")
-        w3 = None # Ensure w3 is None if not connected
-except Exception as e:
-    logger.error(f"Failed to connect to Web3 provider: {e}")
-    w3 = None # Set w3 to None if connection fails
+# Global variables for caching
+_historical_data_cache = None
+_last_cache_update = 0
+_cache_initialized = False
+
+# Get Web3 instance with rotation
+def get_w3():
+    return get_web3_with_rotation()
 
 # ABIs (Application Binary Interfaces) - Simplified for demonstration
 ERC20_ABI = [
@@ -79,16 +81,16 @@ UNISWAP_V3_POOL_ABI = [
 
 # Contract instances - Initialize only if w3 is connected
 def get_weth_contract():
-    return w3.eth.contract(address=WETH_ADDRESS, abi=ERC20_ABI) if w3 else None
+    return get_w3().eth.contract(address=WETH_ADDRESS, abi=ERC20_ABI) if get_w3() else None
 
 def get_pepe_contract():
-    return w3.eth.contract(address=PEPE_ADDRESS, abi=ERC20_ABI) if w3 else None
+    return get_w3().eth.contract(address=PEPE_ADDRESS, abi=ERC20_ABI) if get_w3() else None
 
 def get_uniswap_router_contract():
-    return w3.eth.contract(address=w3.to_checksum_address(UNISWAP_ROUTER_ADDRESS), abi=UNISWAP_ROUTER_ABI) if w3 else None
+    return get_w3().eth.contract(address=get_w3().to_checksum_address(UNISWAP_ROUTER_ADDRESS), abi=UNISWAP_ROUTER_ABI) if get_w3() else None
 
 def get_uniswap_v3_pool_contract(pool_address: str):
-    return w3.eth.contract(address=w3.to_checksum_address(pool_address), abi=UNISWAP_V3_POOL_ABI) if w3 else None
+    return get_w3().eth.contract(address=get_w3().to_checksum_address(pool_address), abi=UNISWAP_V3_POOL_ABI) if get_w3() else None
 
 def calculate_sma(data: pd.Series, window: int) -> pd.Series:
     """Calculates the Simple Moving Average (SMA)."""
@@ -118,205 +120,321 @@ def calculate_macd(data: pd.Series, fast_period: int = 12, slow_period: int = 26
 
 async def get_current_uniswap_v3_price(pool_address: str) -> float:
     """Gets the current price from a Uniswap V3 pool using slot0."""
-    if not w3 or not w3.is_connected():
+    if not get_w3() or not get_w3().is_connected():
         logger.error("Web3 not connected, cannot get Uniswap V3 price.")
         return 0.0
+    
+    def fetch_current_price(web3, pool_address):
+        """Fetch current price using RPC rotation."""
+        try:
+            pool_contract = web3.eth.contract(address=web3.to_checksum_address(pool_address), abi=UNISWAP_V3_POOL_ABI)
+            slot0 = pool_contract.functions.slot0().call()
+            sqrtPriceX96 = slot0[0]
+            price = (sqrtPriceX96 / (2**96))**2
+            return price
+        except Exception as e:
+            raise e
+    
     try:
-        pool_contract = get_uniswap_v3_pool_contract(pool_address)
-        slot0 = pool_contract.functions.slot0().call()
-        sqrtPriceX96 = slot0[0]
-        # Price is (sqrtPriceX96 / 2**96)**2
-        # For WETH/PEPE, if WETH is token0 and PEPE is token1, price is token1/token0
-        # So, PEPE price in WETH
-        price = (sqrtPriceX96 / (2**96))**2
+        # Use the current web3 instance directly for now
+        price = fetch_current_price(get_w3(), pool_address)
         logger.info(f"Fetched current Uniswap V3 price: {price}")
         return price
     except Exception as e:
-        logger.error(f"Error getting current Uniswap V3 price for {pool_address}: {e}")
+        logger.error(f"Error getting current Uniswap V3 price: {e}")
         return 0.0
 
+def fetch_block_data(web3, block_number, pool_address):
+    """Fetch data for a specific block using RPC rotation."""
+    try:
+        pool_contract = web3.eth.contract(address=web3.to_checksum_address(pool_address), abi=UNISWAP_V3_POOL_ABI)
+        slot0 = pool_contract.functions.slot0().call(block_identifier=block_number)
+        sqrtPriceX96 = slot0[0]
+        price = (sqrtPriceX96 / (2**96))**2
+        # Get block info for timestamp
+        block_info = web3.eth.get_block(block_number)
+        timestamp = block_info['timestamp']
+        # Estimate volume from block transactions (simplified approach)
+        estimated_volume = 1000000  # Placeholder - would need to query actual swap events
+        return price, estimated_volume, timestamp
+    except Exception as e:
+        raise e
+
 async def get_historical_uniswap_v3_prices(pool_address: str, num_hours: int, current_price: float) -> pd.DataFrame:
-    """Attempts to get historical prices from Uniswap V3 by querying past blocks.
-    If unable to fetch enough real data, generates synthetic data.
-    """
-    if not w3 or not w3.is_connected():
+    """Attempts to get historical prices and volume from Uniswap V3 by querying past blocks."""
+    if not get_w3() or not get_w3().is_connected():
         logger.error("Web3 not connected, cannot get historical Uniswap V3 prices. Generating synthetic data.")
         return generate_synthetic_historical_data(num_hours, current_price)
 
     prices = []
+    volumes = []
     timestamps = []
+    
     try:
-        current_block = w3.eth.block_number
-        logger.info(f"Attempting to fetch historical data from block {current_block} backwards for {num_hours} hours.")
+        current_block = get_w3().eth.block_number
+        logger.info(f"Attempting to fetch historical OHLCV data from block {current_block} backwards for {num_hours} hours.")
         blocks_per_hour = 240 # Approximate blocks per hour for Ethereum mainnet
 
+        # Optimize for faster data collection - fetch more data points
         for i in range(num_hours):
             block_number = current_block - (i * blocks_per_hour)
             if block_number < 0: 
                 logger.info("Reached genesis block or negative block number, stopping historical data fetch.")
                 break
             try:
-                pool_contract = get_uniswap_v3_pool_contract(pool_address)
-                slot0 = pool_contract.functions.slot0().call(block_identifier=block_number)
-                sqrtPriceX96 = slot0[0]
-                price = (sqrtPriceX96 / (2**96))**2
-                block_info = w3.eth.get_block(block_number)
-                timestamp = block_info['timestamp']
+                # Use RPC rotation for each block fetch
+                price, volume, timestamp = await execute_rpc_call(fetch_block_data, block_number, pool_address)
+                
                 prices.append(price)
+                volumes.append(volume)
                 timestamps.append(timestamp)
-                logger.debug(f"Fetched price {price} at block {block_number} (timestamp {timestamp})")
-                await asyncio.sleep(0.05) # Small delay to avoid hitting RPC rate limits
+                logger.debug(f"Fetched price {price} and volume {volume} at block {block_number} (timestamp {timestamp})")
+                # Minimal delay for fastest data collection
+                await asyncio.sleep(0.01) # Reduced to 0.01 seconds for maximum speed
             except Exception as e:
-                logger.warning(f"Could not fetch historical price for block {block_number}: {e}")
+                logger.warning(f"Could not fetch historical data for block {block_number}: {e}")
                 # Continue even if some blocks fail
 
-        df = pd.DataFrame({'timestamp': timestamps, 'close': prices})
-        if not df.empty:
+        df = pd.DataFrame({
+            'timestamp': timestamps, 
+            'close': prices,
+            'volume': volumes
+        })
+        if not df.empty and len(df) >= 5:  # Require at least 5 data points
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
             df.set_index('timestamp', inplace=True)
             df.sort_index(inplace=True) # Ensure chronological order
-            logger.info(f"Successfully fetched {len(df)} historical data points from blockchain.")
+            logger.info(f"Successfully fetched {len(df)} historical OHLCV data points from blockchain.")
             return df
         else:
-            logger.warning("No historical data points fetched from blockchain. Generating synthetic data.")
+            logger.warning(f"Not enough historical data points fetched from blockchain ({len(df) if not df.empty else 0}). Generating synthetic data.")
             return generate_synthetic_historical_data(num_hours, current_price)
     except Exception as e:
         logger.error(f"An error occurred during historical data fetching from blockchain: {e}. Generating synthetic data.")
         return generate_synthetic_historical_data(num_hours, current_price)
 
 def generate_synthetic_historical_data(num_hours: int, current_price: float) -> pd.DataFrame:
-    """Generates a simple synthetic historical price dataset."""
-    logger.info(f"Generating {num_hours} hours of synthetic historical data.")
+    """Generates a simple synthetic historical price and volume dataset."""
+    logger.info(f"Generating {num_hours} hours of synthetic historical OHLCV data.")
     prices = []
+    volumes = []
     timestamps = []
     # Generate prices that fluctuate around the current price
     for i in range(num_hours):
         # Simple random walk around the current price
         price = current_price * (1 + (random.random() - 0.5) * 0.02) # +/- 1% fluctuation
+        # Generate synthetic volume (random between 500k and 2M)
+        volume = random.randint(500000, 2000000)
         prices.append(price)
+        volumes.append(volume)
         timestamps.append(int(time.time()) - (num_hours - 1 - i) * 3600) # Hourly timestamps
 
-    df = pd.DataFrame({'timestamp': timestamps, 'close': prices})
+    df = pd.DataFrame({
+        'timestamp': timestamps, 
+        'close': prices,
+        'volume': volumes
+    })
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
     df.set_index('timestamp', inplace=True)
     df.sort_index(inplace=True) # Ensure chronological order
     return df
 
+async def get_cached_historical_data(pool_address: str, num_hours: int, current_price: float, reuse_price: bool = False) -> pd.DataFrame:
+    """Efficiently manages historical data cache - only fetches new data when needed."""
+    global _historical_data_cache, _last_cache_update, _cache_initialized
+    
+    current_time = time.time()
+    
+    # Initialize cache if not done yet
+    if not _cache_initialized:
+        logger.info("Initializing historical data cache...")
+        _historical_data_cache = await get_historical_uniswap_v3_prices(pool_address, num_hours, current_price)
+        _last_cache_update = current_time
+        _cache_initialized = True
+        logger.info(f"Cache initialized with {len(_historical_data_cache)} data points")
+        return _historical_data_cache
+    
+    # ALWAYS update cache with new real-time data every cycle
+    logger.debug("Updating cache with new data point...")
+    try:
+        # Get current price and timestamp
+        if not reuse_price:
+            current_price = await get_current_uniswap_v3_price(pool_address)
+        current_timestamp = int(current_time)
+        
+        # Estimate current volume (placeholder - would need real volume data)
+        current_volume = 1000000  # Placeholder volume
+        
+        # Add new data point to cache
+        new_data = pd.DataFrame({
+            'timestamp': [pd.to_datetime(current_timestamp, unit='s')],
+            'close': [current_price],
+            'volume': [current_volume]
+        })
+        new_data.set_index('timestamp', inplace=True)
+        
+        # Append to existing cache
+        _historical_data_cache = pd.concat([_historical_data_cache, new_data])
+        
+        # Keep only the last num_hours of data
+        hours_ago = current_timestamp - (num_hours * 3600)
+        cutoff_time = pd.to_datetime(hours_ago, unit='s')
+        _historical_data_cache = _historical_data_cache[_historical_data_cache.index >= cutoff_time]
+        
+        _last_cache_update = current_time
+        logger.debug(f"Cache updated. Now has {len(_historical_data_cache)} data points")
+        
+    except Exception as e:
+        logger.warning(f"Failed to update cache: {e}")
+    
+    return _historical_data_cache
+
 async def get_trading_signal() -> tuple[str, float]:
     """Calculates the trading signal based on SMA, RSI, and MACD indicators using Uniswap V3 data."""
     current_pepe_price_eth = await get_current_uniswap_v3_price(PEPE_WETH_POOL_ADDRESS)
 
-    # Fetch historical data, with fallback to synthetic data
-    df = await get_historical_uniswap_v3_prices(PEPE_WETH_POOL_ADDRESS, NUM_HOURS_DATA, current_pepe_price_eth)
+    # Use cached historical data for efficiency - pass the already fetched price
+    df = await get_cached_historical_data(PEPE_WETH_POOL_ADDRESS, NUM_HOURS_DATA, current_pepe_price_eth, reuse_price=True)
 
     # Determine the minimum required data points for all indicators
     min_data_points = max(SHORT_SMA_WINDOW, LONG_SMA_WINDOW, RSI_WINDOW, 26) # 26 is for MACD slow period
 
     if df.empty or len(df) < min_data_points:
-        logger.warning("Not enough data (real or synthetic) to calculate signals. Returning HOLD.")
+        logger.warning(f"Not enough real data ({len(df) if not df.empty else 0} points). Need at least {min_data_points} points for signals. Returning HOLD.")
         return "HOLD", current_pepe_price_eth
 
-    df['short_sma'] = calculate_sma(df['close'], SHORT_SMA_WINDOW)
-    df['long_sma'] = calculate_sma(df['close'], LONG_SMA_WINDOW)
-    df['rsi'] = calculate_rsi(df['close'], RSI_WINDOW)
-    df['macd'], df['signal_line'], df['histogram'] = calculate_macd(df['close'])
-
-    # Drop NaN values that result from indicator calculations
-    df.dropna(inplace=True)
-
-    if df.empty:
-        logger.warning("Dataframe is empty after dropping NaNs from indicator calculations. Returning HOLD.")
-        return "HOLD", current_pepe_price_eth
-
-    last_row = df.iloc[-1]
-    previous_row = df.iloc[-2] if len(df) > 1 else None
-
+    # Calculate technical indicators
+    close_prices = df['close']
+    volumes = df['volume']
+    
+    # Calculate SMAs
+    short_sma = calculate_sma(close_prices, SHORT_SMA_WINDOW)
+    long_sma = calculate_sma(close_prices, LONG_SMA_WINDOW)
+    
+    # Calculate RSI
+    rsi = calculate_rsi(close_prices, RSI_WINDOW)
+    
+    # Calculate MACD
+    macd, signal_line, histogram = calculate_macd(close_prices)
+    
+    # Calculate Volume SMA for volume confirmation
+    volume_sma = calculate_sma(volumes, 5)  # 5-period volume SMA
+    
+    # Get the latest values
+    current_short_sma = short_sma.iloc[-1]
+    current_long_sma = long_sma.iloc[-1]
+    current_rsi = rsi.iloc[-1]
+    current_macd = macd.iloc[-1]
+    current_signal_line = signal_line.iloc[-1]
+    current_histogram = histogram.iloc[-1]
+    current_volume = volumes.iloc[-1]
+    current_volume_sma = volume_sma.iloc[-1]
+    
+    # Previous values for crossover detection
+    prev_short_sma = short_sma.iloc[-2] if len(short_sma) > 1 else current_short_sma
+    prev_long_sma = long_sma.iloc[-2] if len(long_sma) > 1 else current_long_sma
+    prev_macd = macd.iloc[-2] if len(macd) > 1 else current_macd
+    prev_signal_line = signal_line.iloc[-2] if len(signal_line) > 1 else current_signal_line
+    
+    logger.info(f"Technical Indicators - Current Price: {current_pepe_price_eth:.2e}, "
+                f"Short SMA: {current_short_sma:.2e}, Long SMA: {current_long_sma:.2e}, "
+                f"RSI: {current_rsi:.2f}, MACD: {current_macd:.2e}, Signal: {current_signal_line:.2e}, "
+                f"Volume: {current_volume:.0f}, Volume SMA: {current_volume_sma:.0f}")
+    
+    # Enhanced trading signal logic (ULTRA AGGRESSIVE DAY TRADING)
     signal = "HOLD"
-    if previous_row is not None:
-        # === AGGRESSIVE DAY TRADING SIGNALS ===
-        
-        # 1. SMA Crossover Signals (Primary)
-        sma_buy_signal = previous_row['short_sma'] <= previous_row['long_sma'] and last_row['short_sma'] > last_row['long_sma']
-        sma_sell_signal = previous_row['short_sma'] >= previous_row['long_sma'] and last_row['short_sma'] < last_row['long_sma']
-        
-        # 2. RSI Signals (Secondary - more sensitive for day trading)
-        rsi_buy_condition = last_row['rsi'] < RSI_OVERBOUGHT  # Buy when RSI < 75 (less restrictive)
-        rsi_sell_condition = last_row['rsi'] > RSI_OVERSOLD   # Sell when RSI > 25 (less restrictive)
-        
-        # 3. MACD Signals (Additional momentum confirmation)
-        macd_buy_signal = last_row['macd'] > last_row['signal_line'] and previous_row['macd'] <= previous_row['signal_line']
-        macd_sell_signal = last_row['macd'] < last_row['signal_line'] and previous_row['macd'] >= previous_row['signal_line']
-        
-        # 4. Price Momentum Signals (Additional day trading triggers)
-        price_momentum_buy = last_row['close'] > previous_row['close'] * 1.001  # 0.1% price increase
-        price_momentum_sell = last_row['close'] < previous_row['close'] * 0.999  # 0.1% price decrease
-        
-        # === AGGRESSIVE SIGNAL COMBINATIONS ===
-        
-        # BUY Signals (any of these combinations):
-        buy_signals = [
-            # Primary: SMA crossover + RSI
-            sma_buy_signal and rsi_buy_condition,
-            # Secondary: MACD crossover + RSI
-            macd_buy_signal and rsi_buy_condition,
-            # Tertiary: SMA crossover + price momentum
-            sma_buy_signal and price_momentum_buy,
-            # Quaternary: Strong RSI oversold + price momentum
-            last_row['rsi'] < 30 and price_momentum_buy,
-            # Quinary: MACD crossover + price momentum
-            macd_buy_signal and price_momentum_buy
-        ]
-        
-        # SELL Signals (any of these combinations):
-        sell_signals = [
-            # Primary: SMA crossover + RSI
-            sma_sell_signal and rsi_sell_condition,
-            # Secondary: MACD crossover + RSI
-            macd_sell_signal and rsi_sell_condition,
-            # Tertiary: SMA crossover + price momentum
-            sma_sell_signal and price_momentum_sell,
-            # Quaternary: Strong RSI overbought + price momentum
-            last_row['rsi'] > 70 and price_momentum_sell,
-            # Quinary: MACD crossover + price momentum
-            macd_sell_signal and price_momentum_sell
-        ]
-        
-        # Determine final signal
-        if any(buy_signals):
-            signal = "BUY"
-            logger.info(f"BUY signal triggered - SMA: {sma_buy_signal}, RSI: {rsi_buy_condition}, MACD: {macd_buy_signal}, Momentum: {price_momentum_buy}")
-        elif any(sell_signals):
-            signal = "SELL"
-            logger.info(f"SELL signal triggered - SMA: {sma_sell_signal}, RSI: {rsi_sell_condition}, MACD: {macd_sell_signal}, Momentum: {price_momentum_sell}")
-        else:
-            signal = "HOLD"
-            logger.debug(f"HOLD - No signals met. RSI: {last_row['rsi']:.2f}, MACD: {last_row['macd']:.6f}, Price: {last_row['close']:.6f}")
-
+    
+    # BUY Signals (Multiple conditions for aggressive trading)
+    buy_signals = 0
+    
+    # 1. SMA Crossover (Golden Cross)
+    if current_short_sma > current_long_sma and prev_short_sma <= prev_long_sma:
+        buy_signals += 1
+        logger.info("BUY Signal: Golden Cross detected (SMA crossover)")
+    
+    # 2. RSI Oversold
+    if current_rsi < RSI_OVERSOLD:
+        buy_signals += 1
+        logger.info(f"BUY Signal: RSI oversold ({current_rsi:.2f} < {RSI_OVERSOLD})")
+    
+    # 3. MACD Crossover (Bullish)
+    if current_macd > current_signal_line and prev_macd <= prev_signal_line:
+        buy_signals += 1
+        logger.info("BUY Signal: MACD bullish crossover")
+    
+    # 4. Price above short SMA (momentum)
+    if current_pepe_price_eth > current_short_sma:
+        buy_signals += 1
+        logger.info("BUY Signal: Price above short SMA (momentum)")
+    
+    # 5. Volume confirmation (high volume supports price movement)
+    if current_volume > current_volume_sma * 1.2:  # 20% above average volume
+        buy_signals += 1
+        logger.info(f"BUY Signal: High volume confirmation ({current_volume:.0f} > {current_volume_sma * 1.2:.0f})")
+    
+    # SELL Signals (Multiple conditions for aggressive trading)
+    sell_signals = 0
+    
+    # 1. SMA Crossover (Death Cross)
+    if current_short_sma < current_long_sma and prev_short_sma >= prev_long_sma:
+        sell_signals += 1
+        logger.info("SELL Signal: Death Cross detected (SMA crossover)")
+    
+    # 2. RSI Overbought
+    if current_rsi > RSI_OVERBOUGHT:
+        sell_signals += 1
+        logger.info(f"SELL Signal: RSI overbought ({current_rsi:.2f} > {RSI_OVERBOUGHT})")
+    
+    # 3. MACD Crossover (Bearish)
+    if current_macd < current_signal_line and prev_macd >= prev_signal_line:
+        sell_signals += 1
+        logger.info("SELL Signal: MACD bearish crossover")
+    
+    # 4. Price below short SMA (momentum loss)
+    if current_pepe_price_eth < current_short_sma:
+        sell_signals += 1
+        logger.info("SELL Signal: Price below short SMA (momentum loss)")
+    
+    # 5. Volume confirmation (high volume supports price movement)
+    if current_volume > current_volume_sma * 1.2:  # 20% above average volume
+        sell_signals += 1
+        logger.info(f"SELL Signal: High volume confirmation ({current_volume:.0f} > {current_volume_sma * 1.2:.0f})")
+    
+    # Decision Logic (ULTRA AGGRESSIVE: Any signal triggers trade)
+    if buy_signals >= 1:  # Any buy signal triggers BUY
+        signal = "BUY"
+        logger.info(f"BUY decision: {buy_signals} buy signals detected")
+    elif sell_signals >= 1:  # Any sell signal triggers SELL
+        signal = "SELL"
+        logger.info(f"SELL decision: {sell_signals} sell signals detected")
+    else:
+        logger.info("HOLD decision: No clear signals")
+    
     return signal, current_pepe_price_eth
 
 async def get_eth_balance(address: str) -> float:
     """Gets the ETH balance for a given address."""
-    if not w3 or not w3.is_connected():
+    if not get_w3() or not get_w3().is_connected():
         logger.error("Web3 not connected, cannot get ETH balance.")
         return 0.0
     try:
-        balance_wei = w3.eth.get_balance(w3.to_checksum_address(address))
-        return w3.from_wei(balance_wei, 'ether')
+        balance_wei = get_w3().eth.get_balance(get_w3().to_checksum_address(address))
+        return float(get_w3().from_wei(balance_wei, 'ether'))
     except Exception as e:
         logger.error(f"Error getting ETH balance for {address}: {e}")
         return 0.0
 
 async def get_token_balance(token_address: str, address: str) -> float:
     """Gets the balance of a specific ERC-20 token for a given address."""
-    if not w3 or not w3.is_connected():
+    if not get_w3() or not get_w3().is_connected():
         logger.error("Web3 not connected, cannot get token balance.")
         return 0.0
     try:
-        token_contract = w3.eth.contract(address=w3.to_checksum_address(token_address), abi=ERC20_ABI)
-        balance_wei = token_contract.functions.balanceOf(w3.to_checksum_address(address)).call()
+        token_contract = get_w3().eth.contract(address=get_w3().to_checksum_address(token_address), abi=ERC20_ABI)
+        balance_wei = token_contract.functions.balanceOf(get_w3().to_checksum_address(address)).call()
         # You'll need to get the token's decimals to convert from wei
         # For simplicity, assuming 18 decimals for now (like ETH)
-        return w3.from_wei(balance_wei, 'ether')
+        return float(get_w3().from_wei(balance_wei, 'ether'))
     except Exception as e:
         logger.error(f"Error getting token balance for {address}: {e}")
         return 0.0
@@ -325,13 +443,13 @@ async def construct_simulated_swap_transaction(amount_in: float, path: list[str]
     """Constructs a transaction object, but DOES NOT sign or send it. For demonstration only."""
     # Ensure contracts are initialized before use
     uniswap_router_contract = get_uniswap_router_contract()
-    if not w3 or not w3.is_connected() or not uniswap_router_contract:
+    if not get_w3() or not get_w3().is_connected() or not uniswap_router_contract:
         logger.error("Web3 not connected or Uniswap router contract not initialized, cannot construct transaction.")
         return None
 
     try:
         # Get current gas price
-        gas_price = w3.eth.gas_price
+        gas_price = get_w3().eth.gas_price
 
         # Build the transaction
         if is_buy: # ETH to PEPE
@@ -341,29 +459,29 @@ async def construct_simulated_swap_transaction(amount_in: float, path: list[str]
             # For simplicity, using a generic swapExactTokensForTokens from V2 router ABI for conceptual understanding.
             # You would need the correct V3 router ABI and function for actual V3 swaps.
             tx = uniswap_router_contract.functions.swapExactTokensForTokens(
-                w3.to_wei(amount_in, 'ether'), # amountIn (ETH)
+                get_w3().to_wei(amount_in, 'ether'), # amountIn (ETH)
                 0, # amountOutMin (slippage control, set to 0 for simulation)
-                [w3.to_checksum_address(p) for p in path], # Ensure path addresses are checksummed
-                w3.to_checksum_address(to_address),
+                [get_w3().to_checksum_address(p) for p in path], # Ensure path addresses are checksummed
+                get_w3().to_checksum_address(to_address),
                 deadline
             ).build_transaction({
-                'from': w3.to_checksum_address(to_address),
+                'from': get_w3().to_checksum_address(to_address),
                 'gas': 300000, # Estimate gas or use a higher value for simulation
                 'gasPrice': gas_price,
-                'nonce': w3.eth.get_transaction_count(w3.to_checksum_address(to_address))
+                'nonce': get_w3().eth.get_transaction_count(get_w3().to_checksum_address(to_address))
             })
         else: # PEPE to ETH
             tx = uniswap_router_contract.functions.swapExactTokensForTokens(
-                w3.to_wei(amount_in, 'ether'), # amountIn (PEPE, assuming 18 decimals)
+                get_w3().to_wei(amount_in, 'ether'), # amountIn (PEPE, assuming 18 decimals)
                 0, # amountOutMin
-                [w3.to_checksum_address(p) for p in path], # Ensure path addresses are checksummed
-                w3.to_checksum_address(to_address),
+                [get_w3().to_checksum_address(p) for p in path], # Ensure path addresses are checksummed
+                get_w3().to_checksum_address(to_address),
                 deadline
             ).build_transaction({
-                'from': w3.to_checksum_address(to_address),
+                'from': get_w3().to_checksum_address(to_address),
                 'gas': 300000, # Estimate gas or use a higher value for simulation
                 'gasPrice': gas_price,
-                'nonce': w3.eth.get_transaction_count(w3.to_checksum_address(to_address))
+                'nonce': get_w3().eth.get_transaction_count(get_w3().to_checksum_address(to_address))
             })
 
         logger.info("--- Constructed Simulated Transaction (NOT SIGNED/SENT) ---")

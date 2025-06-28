@@ -14,12 +14,12 @@ from config import (
     MAX_DAILY_VOLUME_ETH,
     MAX_GAS_PRICE_GWEI
 )
+from trading_logic import get_w3
 
 logger = logging.getLogger(__name__)
 
 class RiskManager:
-    def __init__(self, w3: Web3):
-        self.w3 = w3
+    def __init__(self):
         self.last_trade_time = None
         self.daily_trade_count = 0
         self.daily_volume_eth = 0.0
@@ -80,8 +80,8 @@ class RiskManager:
         
         # Gas price validation (more lenient)
         try:
-            gas_price = self.w3.eth.gas_price
-            gas_price_gwei = self.w3.from_wei(gas_price, 'gwei')
+            gas_price = get_w3().eth.gas_price
+            gas_price_gwei = get_w3().from_wei(gas_price, 'gwei')
             if gas_price_gwei > MAX_GAS_PRICE_GWEI:
                 return False, f"Gas price too high: {gas_price_gwei} gwei"
         except Exception as e:
@@ -102,8 +102,8 @@ class RiskManager:
     async def get_eth_balance(self, address: str) -> float:
         """Get ETH balance for an address."""
         try:
-            balance_wei = self.w3.eth.get_balance(self.w3.to_checksum_address(address))
-            return self.w3.from_wei(balance_wei, 'ether')
+            balance_wei = get_w3().eth.get_balance(get_w3().to_checksum_address(address))
+            return float(get_w3().from_wei(balance_wei, 'ether'))
         except Exception as e:
             logger.error(f"Error getting ETH balance: {e}")
             raise
@@ -113,9 +113,9 @@ class RiskManager:
         try:
             # Simplified ERC20 balance check
             erc20_abi = [{"constant":True,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]
-            token_contract = self.w3.eth.contract(address=self.w3.to_checksum_address(token_address), abi=erc20_abi)
-            balance_wei = token_contract.functions.balanceOf(self.w3.to_checksum_address(address)).call()
-            return self.w3.from_wei(balance_wei, 'ether')
+            token_contract = get_w3().eth.contract(address=get_w3().to_checksum_address(token_address), abi=erc20_abi)
+            balance_wei = token_contract.functions.balanceOf(get_w3().to_checksum_address(address)).call()
+            return float(get_w3().from_wei(balance_wei, 'ether'))
         except Exception as e:
             logger.error(f"Error getting token balance: {e}")
             raise

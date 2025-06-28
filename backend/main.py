@@ -5,15 +5,14 @@ from datetime import datetime, UTC, timedelta
 import uuid
 from decimal import Decimal
 
-from trading_logic import get_trading_signal, get_eth_balance, get_token_balance
+from trading_logic import get_trading_signal, get_eth_balance, get_token_balance, get_w3
 from config import (
-    INITIAL_ETH_BALANCE,
-    TRADE_PERCENTAGE,
     WALLET_ADDRESS,
     PRIVATE_KEY,
     PEPE_ADDRESS,
     WETH_ADDRESS,
     LIVE_TRADING_ENABLED,
+    TRADE_PERCENTAGE,
     EMERGENCY_STOP_RECOVERY_ENABLED,
     EMERGENCY_STOP_RECOVERY_THRESHOLD,
     EMERGENCY_STOP_RECOVERY_WAIT_HOURS
@@ -21,7 +20,6 @@ from config import (
 from database import init_db, SessionLocal, SimulatedTrade, PortfolioState, LiveTrade, TradingSession, RiskEvent
 from risk_management import RiskManager
 from live_trading import LiveTrader
-from trading_logic import w3
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -147,6 +145,12 @@ async def execute_live_trade(signal: str, current_pepe_price_eth: float, db: Ses
                 
         elif signal == "SELL":
             pepe_balance = await get_token_balance(PEPE_ADDRESS, WALLET_ADDRESS)
+            
+            # Check if we have PEPE to sell
+            if pepe_balance <= 0:
+                logger.warning(f"SELL signal ignored: No PEPE balance to sell (balance: {pepe_balance})")
+                return
+            
             trade_amount = pepe_balance * TRADE_PERCENTAGE
             
             # Execute sell order
@@ -198,16 +202,16 @@ async def initialize_live_trading():
     global risk_manager, live_trader, current_session
     
     try:
-        if not w3 or not w3.is_connected():
+        if not get_w3() or not get_w3().is_connected():
             logger.error("Web3 not connected - cannot initialize live trading")
             return False
         
         # Initialize risk manager
-        risk_manager = RiskManager(w3)
+        risk_manager = RiskManager()
         risk_manager.live_trading_enabled = True  # Set to True since we're initializing live trading
         
         # Initialize live trader
-        live_trader = LiveTrader(w3, risk_manager)
+        live_trader = LiveTrader(get_w3(), risk_manager)
         
         # Create trading session
         db = SessionLocal()

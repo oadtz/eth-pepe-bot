@@ -6,9 +6,25 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Web3 Configuration ---
-WEB3_PROVIDER_URL = os.getenv("WEB3_PROVIDER_URL")
-if not WEB3_PROVIDER_URL:
-    raise ValueError("WEB3_PROVIDER_URL not found in .env file")
+# RPC providers with rotation for rate limit handling
+# Primary provider is optional - public providers are reliable
+RPC_PROVIDERS = [
+    os.getenv("WEB3_PROVIDER_URL"),  # Your primary provider (Infura/Alchemy/etc) - OPTIONAL
+    "https://cloudflare-eth.com",    # Cloudflare public RPC
+    "https://rpc.ankr.com/eth",      # Ankr public RPC
+    "https://eth.llamarpc.com",      # LlamaRPC public
+    "https://ethereum.publicnode.com", # PublicNode
+    "https://1rpc.io/eth",           # 1RPC public
+]
+
+# Filter out None values (if WEB3_PROVIDER_URL is not set)
+RPC_PROVIDERS = [provider for provider in RPC_PROVIDERS if provider]
+
+if not RPC_PROVIDERS:
+    raise ValueError("No RPC providers configured. Please set WEB3_PROVIDER_URL in .env file or use public providers")
+
+# Current RPC index for rotation
+_current_rpc_index = 0
 
 # --- Wallet Configuration (Sensitive - Handle with Extreme Care) ---
 WALLET_ADDRESS = os.getenv("WALLET_ADDRESS")
@@ -16,10 +32,10 @@ PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 
 # --- Live Trading Configuration ---
 LIVE_TRADING_ENABLED = os.getenv("LIVE_TRADING_ENABLED", "false").lower() == "true"
-MAX_TRADE_SIZE_ETH = float(os.getenv("MAX_TRADE_SIZE_ETH", "0.5"))
+MAX_TRADE_SIZE_ETH = float(os.getenv("MAX_TRADE_SIZE_ETH", "0.01"))
 EMERGENCY_STOP_LOSS = float(os.getenv("EMERGENCY_STOP_LOSS", "0.20"))
 GAS_LIMIT_MULTIPLIER = float(os.getenv("GAS_LIMIT_MULTIPLIER", "1.1"))
-SLIPPAGE_TOLERANCE = float(os.getenv("SLIPPAGE_TOLERANCE", "0.05"))
+SLIPPAGE_TOLERANCE = float(os.getenv("SLIPPAGE_TOLERANCE", "0.02"))
 MAX_DAILY_TRADES = int(os.getenv("MAX_DAILY_TRADES", "50"))
 MAX_DAILY_VOLUME_ETH = float(os.getenv("MAX_DAILY_VOLUME_ETH", "10.0"))
 MAX_GAS_PRICE_GWEI = int(os.getenv("MAX_GAS_PRICE_GWEI", "200"))
@@ -31,7 +47,12 @@ EMERGENCY_STOP_RECOVERY_WAIT_HOURS = int(os.getenv("EMERGENCY_STOP_RECOVERY_WAIT
 
 # --- Uniswap Subgraph Configuration (Removed - Using CoinGecko) ---
 # UNISWAP_SUBGRAPH_URL is no longer needed
-PEPE_WETH_POOL_ADDRESS = "0x11950d141ecb863f01007add7d1a342041227b58" # Uniswap V3 PEPE/WETH 0.3% fee tier
+
+# PEPE/WETH Pool Addresses (multiple fee tiers for better liquidity)
+PEPE_WETH_POOL_ADDRESS = "0x11950d141ecb863f01007add7d1a342041227b58" # Uniswap V3 PEPE/WETH 0.3% fee tier (MAIN POOL)
+PEPE_WETH_POOL_1PERCENT = "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8" # 1% fee tier 
+PEPE_WETH_POOL_005PERCENT = "0x4e68ccd3e89f51c3074ca5072bbac773960dfa36" # 0.05% fee tier
+
 UNISWAP_ROUTER_ADDRESS = '0xE592427A0AEce92De3Edee1F18F0157Cc0fEf9f2' # Uniswap V3 Router 2
 
 # --- Token Addresses (Mainnet) ---
@@ -44,11 +65,12 @@ LONG_SMA_WINDOW = 8       # Fast 8-period SMA (was 15)
 RSI_WINDOW = 5            # Fast 5-period RSI (was 7)
 RSI_OVERSOLD = 35         # Buy at RSI 35 (was 25 - less restrictive)
 RSI_OVERBOUGHT = 65       # Sell at RSI 65 (was 75 - less restrictive)
-NUM_HOURS_DATA = 24       # 24 hours data (was 30 - faster response)
+NUM_HOURS_DATA = 72       # 72 hours data (better for accurate trading signals)
 
-# --- Bot Simulation Parameters ---
-INITIAL_ETH_BALANCE = 0.019532
-TRADE_PERCENTAGE = 0.25
+# --- Bot Trading Parameters ---
+TRADE_PERCENTAGE = 0.05  # Reduced from 0.25 to 0.05 (5% of balance instead of 25%)
+
+# Note: INITIAL_ETH_BALANCE removed - bot always fetches real wallet balance on startup
 
 # --- FastAPI/CORS Configuration (Removed) ---
 # CORS_ORIGINS = [

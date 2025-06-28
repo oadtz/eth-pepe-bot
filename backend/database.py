@@ -78,29 +78,33 @@ class RiskEvent(Base):
     trade_id = Column(String, nullable=True)
 
 def init_db(initial_eth_balance=None):
-    Base.metadata.create_all(bind=engine)
-    logger.info("Database initialized.")
-
-    # Initialize portfolio state if it doesn't exist
+    """Initialize the database with initial portfolio state."""
+    engine = create_engine(DATABASE_URL)
+    Base.metadata.create_all(engine)
+    
+    # Create initial portfolio state
     db = SessionLocal()
     try:
-        current_state = db.query(PortfolioState).filter(PortfolioState.id == "current_state").first()
-        if not current_state:
-            # Use provided initial balance or fall back to config
-            if initial_eth_balance is None:
-                from config import INITIAL_ETH_BALANCE
-                initial_eth_balance = INITIAL_ETH_BALANCE
-            
-            initial_state = PortfolioState(
-                id="current_state",
-                eth_balance=initial_eth_balance,
-                pepe_balance=0.0
-            )
-            db.add(initial_state)
-            db.commit()
-            logger.info(f"Initial portfolio state created with {initial_eth_balance:.6f} ETH.")
-    except Exception as e:
-        logger.error(f"Error initializing portfolio state: {e}")
-        db.rollback()
+        # Check if initial state already exists
+        existing_state = db.query(PortfolioState).filter(PortfolioState.id == "current_state").first()
+        if existing_state:
+            logger.info("Database already initialized with portfolio state.")
+            return
+        
+        # Create initial portfolio state
+        # Note: initial_eth_balance should always be provided from real wallet balance
+        if initial_eth_balance is None:
+            logger.warning("No initial ETH balance provided - this should not happen in live trading")
+            initial_eth_balance = 0.0
+        
+        initial_state = PortfolioState(
+            id="current_state",
+            eth_balance=initial_eth_balance,
+            pepe_balance=0.0,
+            timestamp=datetime.now(UTC)
+        )
+        db.add(initial_state)
+        db.commit()
+        logger.info(f"Initial portfolio state created with {initial_eth_balance:.6f} ETH.")
     finally:
         db.close()
