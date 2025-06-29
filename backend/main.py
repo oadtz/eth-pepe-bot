@@ -159,7 +159,7 @@ async def execute_live_trade(signal: str, current_pepe_price_eth: float, db: Ses
                 logger.warning(f"SELL signal ignored: No PEPE balance to sell (balance: {pepe_balance})")
                 return
             
-            trade_amount = pepe_balance * TRADE_PERCENTAGE
+            trade_amount = pepe_balance  # AGGRESSIVE SELL: Sell 100% of PEPE tokens
             
             # Execute sell order
             success, message = await live_trader.execute_sell_order(trade_amount, current_pepe_price_eth)
