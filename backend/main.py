@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from sqlalchemy.orm import Session
-from datetime import datetime, UTC, timedelta
+from datetime import datetime, timezone, timedelta
 import uuid
 from decimal import Decimal
 
@@ -76,7 +76,7 @@ async def execute_simulated_trade(signal: str, current_pepe_price_eth: float, db
             logger.info(f"SIMULATED SELL: Sold {pepe_to_sell:.6f} PEPE, Received {eth_received:.6f} ETH")
 
     # Save updated simulated balances to DB
-    current_state.last_updated = datetime.now(UTC)
+    current_state.last_updated = datetime.now(timezone.utc)
     db.add(current_state)
     db.commit()
     db.refresh(current_state)
@@ -85,7 +85,7 @@ async def execute_simulated_trade(signal: str, current_pepe_price_eth: float, db
     if signal in ["BUY", "SELL"] and (eth_amount_traded > 0 or pepe_amount_traded > 0):
         trade_log = SimulatedTrade(
             id=str(uuid.uuid4()),
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(timezone.utc),
             signal=signal,
             eth_amount=eth_amount_traded if signal == "BUY" else -eth_amount_traded, # Positive for buy, negative for sell
             pepe_amount=pepe_amount_traded if signal == "BUY" else -pepe_amount_traded, # Positive for buy, negative for sell
@@ -107,8 +107,16 @@ async def execute_live_trade(signal: str, current_pepe_price_eth: float, db: Ses
         return
     
     try:
+        # Check current PEPE balance for position management
+        current_pepe_balance = await get_token_balance(PEPE_ADDRESS, WALLET_ADDRESS)
+        
         # Calculate trade amount
         if signal == "BUY":
+            # POSITION MANAGEMENT: Don't buy if already holding significant PEPE
+            if current_pepe_balance > 0:
+                logger.info(f"BUY signal ignored: Already holding {current_pepe_balance:.0f} PEPE tokens")
+                return
+            
             eth_amount = await get_eth_balance(WALLET_ADDRESS)
             trade_amount = eth_amount * TRADE_PERCENTAGE
             
@@ -278,7 +286,12 @@ async def main_bot_loop():
                 
                 # Execute trade based on mode and emergency stop status
                 if live_trading_active and not emergency_stop_triggered and signal in ["BUY", "SELL"]:
-                    await execute_live_trade(signal, current_pepe_price_eth, db)
+                    # Check if Web3 is connected before attempting live trade
+                    if get_w3() and get_w3().is_connected():
+                        await execute_live_trade(signal, current_pepe_price_eth, db)
+                    else:
+                        logger.warning("Web3 not connected - skipping live trade, falling back to simulation")
+                        await execute_simulated_trade(signal, current_pepe_price_eth, db)
                 elif signal in ["BUY", "SELL"] and not emergency_stop_triggered:
                     await execute_simulated_trade(signal, current_pepe_price_eth, db)
                 elif emergency_stop_triggered and signal in ["BUY", "SELL"]:
@@ -319,7 +332,7 @@ async def main_bot_loop():
                     if await risk_manager.emergency_stop_check(current_portfolio_value_eth, initial_eth_balance):
                         logger.critical("EMERGENCY STOP LOSS TRIGGERED - PAUSING TRADING")
                         emergency_stop_triggered = True
-                        emergency_stop_time = datetime.now(UTC)
+                        emergency_stop_time = datetime.now(timezone.utc)
                         emergency_stop_portfolio_value = current_portfolio_value_eth
                         
                         # Update session with emergency stop
@@ -341,7 +354,7 @@ async def main_bot_loop():
                 
                 # Check for recovery conditions
                 if emergency_stop_triggered and EMERGENCY_STOP_RECOVERY_ENABLED:
-                    time_since_emergency_stop = datetime.now(UTC) - emergency_stop_time
+                    time_since_emergency_stop = datetime.now(timezone.utc) - emergency_stop_time
                     hours_since_emergency_stop = time_since_emergency_stop.total_seconds() / 3600
                     
                     # Check if enough time has passed and portfolio has recovered
@@ -387,7 +400,7 @@ async def main_bot_loop():
     finally:
         # End trading session
         if current_session:
-            current_session.end_time = datetime.now(UTC)
+            current_session.end_time = datetime.now(timezone.utc)
             current_session.final_eth_balance = convert_to_float(await get_eth_balance(WALLET_ADDRESS))
             db.add(current_session)
             db.commit()

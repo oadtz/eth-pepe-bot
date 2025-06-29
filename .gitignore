@@ -1,2 +1,4 @@
 backend/__pycache__
 backend/venv
+bot_logs.txt
+simulated_trades.db

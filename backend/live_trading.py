@@ -17,33 +17,35 @@ from config import (
     PEPE_WETH_POOL_1PERCENT,
     PEPE_WETH_POOL_005PERCENT
 )
-from trading_logic import get_w3, get_eth_balance
+from trading_logic import get_w3, get_eth_balance, get_token_balance
 
 logger = logging.getLogger(__name__)
 
-# Uniswap V3 Router ABI (simplified for swapExactInputSingle)
-UNISWAP_V3_ROUTER_ABI = [
+# Uniswap V2 Router ABI (for swapExactETHForTokens like Uniswap interface)
+UNISWAP_V2_ROUTER_ABI = [
     {
         "inputs": [
-            {
-                "components": [
-                    {"internalType": "address", "name": "tokenIn", "type": "address"},
-                    {"internalType": "address", "name": "tokenOut", "type": "address"},
-                    {"internalType": "uint24", "name": "fee", "type": "uint24"},
-                    {"internalType": "address", "name": "recipient", "type": "address"},
-                    {"internalType": "uint256", "name": "deadline", "type": "uint256"},
-                    {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
-                    {"internalType": "uint256", "name": "amountOutMinimum", "type": "uint256"},
-                    {"internalType": "uint160", "name": "sqrtPriceLimitX96", "type": "uint160"}
-                ],
-                "internalType": "struct ISwapRouter.ExactInputSingleParams",
-                "name": "params",
-                "type": "tuple"
-            }
+            {"internalType": "uint256", "name": "amountOutMin", "type": "uint256"},
+            {"internalType": "address[]", "name": "path", "type": "address[]"},
+            {"internalType": "address", "name": "to", "type": "address"},
+            {"internalType": "uint256", "name": "deadline", "type": "uint256"}
         ],
-        "name": "exactInputSingle",
-        "outputs": [{"internalType": "uint256", "name": "amountOut", "type": "uint256"}],
+        "name": "swapExactETHForTokens",
+        "outputs": [{"internalType": "uint256[]", "name": "amounts", "type": "uint256[]"}],
         "stateMutability": "payable",
+        "type": "function"
+    },
+    {
+        "inputs": [
+            {"internalType": "uint256", "name": "amountIn", "type": "uint256"},
+            {"internalType": "uint256", "name": "amountOutMin", "type": "uint256"},
+            {"internalType": "address[]", "name": "path", "type": "address[]"},
+            {"internalType": "address", "name": "to", "type": "address"},
+            {"internalType": "uint256", "name": "deadline", "type": "uint256"}
+        ],
+        "name": "swapExactTokensForTokens",
+        "outputs": [{"internalType": "uint256[]", "name": "amounts", "type": "uint256[]"}],
+        "stateMutability": "nonpayable",
         "type": "function"
     }
 ]
@@ -89,7 +91,7 @@ class LiveTrader:
         try:
             self.router_contract = get_w3().eth.contract(
                 address=get_w3().to_checksum_address(UNISWAP_ROUTER_ADDRESS),
-                abi=UNISWAP_V3_ROUTER_ABI
+                abi=UNISWAP_V2_ROUTER_ABI
             )
             self.weth_contract = get_w3().eth.contract(
                 address=get_w3().to_checksum_address(WETH_ADDRESS),
@@ -122,17 +124,23 @@ class LiveTrader:
             available_eth = await get_eth_balance(self.account.address)
             safe_eth_amount = min(eth_amount, available_eth * 0.5)  # Use max 50% of available ETH
             
-            if safe_eth_amount < 0.0001:  # Minimum 0.0001 ETH (reduced from 0.001)
+            if safe_eth_amount < 0.001:  # Minimum 0.001 ETH (reduced from 0.002)
                 return False, f"Insufficient ETH for trade: {safe_eth_amount} ETH"
             
-            # Calculate minimum PEPE to receive (with MORE CONSERVATIVE slippage protection)
+            # Calculate minimum PEPE to receive (MetaMask-style slippage protection)
             expected_pepe = safe_eth_amount / current_price
-            min_pepe_amount = expected_pepe * (1 - SLIPPAGE_TOLERANCE * 2)  # Double the slippage protection
+            # Use 2% slippage tolerance (more reasonable than 1% or 10%)
+            min_pepe_amount = expected_pepe * 0.98  # 2% slippage tolerance
             
             # CRITICAL FIX: Ensure minimum amount is never 0 or too small
             if min_pepe_amount <= 0:
-                min_pepe_amount = expected_pepe * 0.5  # At least 50% of expected amount
-                logger.warning(f"Minimum amount was 0, setting to 50% of expected: {min_pepe_amount:.0f}")
+                min_pepe_amount = expected_pepe * 0.95  # At least 95% of expected amount
+                logger.warning(f"Minimum amount was 0, setting to 95% of expected: {min_pepe_amount:.0f}")
+            
+            # ADDITIONAL SAFETY: Check if the trade amount is too small for the pool
+            if safe_eth_amount < 0.001:  # Very small trades often fail
+                logger.warning(f"Trade amount {safe_eth_amount} ETH is very small and may fail")
+                return False, f"Trade amount too small for reliable execution: {safe_eth_amount} ETH"
             
             # Get PEPE decimals for correct amount conversion
             try:
@@ -159,34 +167,49 @@ class LiveTrader:
             if gas_price_gwei > MAX_GAS_PRICE_GWEI:
                 return False, f"Gas price too high: {gas_price_gwei} gwei"
             
-            # Get the best pool with sufficient liquidity
-            best_pool, pool_fee = await self.get_best_pool()
-            
             # Build the swap transaction
             deadline = int((datetime.now() + timedelta(minutes=20)).timestamp())
             
-            # Use exactInputSingle with ETH value
+            # Use swapExactETHForTokens like Uniswap interface does (more reliable)
             swap_params = {
-                'tokenIn': '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',  # WETH address
-                'tokenOut': PEPE_ADDRESS,
-                'fee': pool_fee,  # Use the fee from the best pool
-                'recipient': self.account.address,
-                'deadline': deadline,
-                'amountIn': get_w3().to_wei(safe_eth_amount, 'ether'),
-                'amountOutMinimum': min_pepe_wei,  # Use correct PEPE decimals
-                'sqrtPriceLimitX96': 0
+                'amountOutMin': min_pepe_wei,  # Minimum tokens to receive
+                'path': [WETH_ADDRESS, PEPE_ADDRESS],  # ETH -> WETH -> PEPE path
+                'to': self.account.address,  # Recipient
+                'deadline': deadline
             }
             
-            logger.info(f"Swap params - Pool: {best_pool}, Fee: {pool_fee}, AmountIn: {get_w3().to_wei(safe_eth_amount, 'ether')}, AmountOutMin: {min_pepe_wei}")
+            logger.info(f"Swap params - Path: ETH->WETH->PEPE, AmountIn: {get_w3().to_wei(safe_eth_amount, 'ether')}, AmountOutMin: {min_pepe_wei}")
             
-            # Build transaction - send ETH value for automatic wrapping
-            transaction = self.router_contract.functions.exactInputSingle(swap_params).build_transaction({
+            # Build transaction using swapExactETHForTokens
+            transaction = self.router_contract.functions.swapExactETHForTokens(
+                swap_params['amountOutMin'],
+                swap_params['path'],
+                swap_params['to'],
+                swap_params['deadline']
+            ).build_transaction({
                 'from': self.account.address,
                 'value': get_w3().to_wei(safe_eth_amount, 'ether'),  # Send ETH with transaction
-                'gas': 300000,
                 'gasPrice': gas_price,
                 'nonce': nonce
             })
+            
+            # Estimate gas like MetaMask does
+            try:
+                estimated_gas = self.router_contract.functions.swapExactETHForTokens(
+                    swap_params['amountOutMin'],
+                    swap_params['path'],
+                    swap_params['to'],
+                    swap_params['deadline']
+                ).estimate_gas({
+                    'from': self.account.address,
+                    'value': get_w3().to_wei(safe_eth_amount, 'ether')
+                })
+                # Add 20% buffer for safety
+                transaction['gas'] = int(estimated_gas * 1.2)
+                logger.info(f"Estimated gas: {estimated_gas}, Using: {transaction['gas']}")
+            except Exception as gas_error:
+                logger.warning(f"Gas estimation failed, using default: {gas_error}")
+                transaction['gas'] = 300000  # Fallback to default
             
             # Sign and send transaction
             signed_txn = self.account.sign_transaction(transaction)
@@ -203,17 +226,34 @@ class LiveTrader:
                 swap_occurred = False
                 for log in receipt.logs:
                     # Look for Transfer events to PEPE address
+                    # Transfer event signature: 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
                     if len(log.topics) > 0 and log.topics[0].hex() == '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef':
-                        # This is a Transfer event
-                        if log.address.lower() == PEPE_ADDRESS.lower():
-                            swap_occurred = True
-                            break
+                        # This is a Transfer event - check if it's to our address
+                        if len(log.topics) >= 3:
+                            # topics[1] = from address, topics[2] = to address
+                            to_address = '0x' + log.topics[2].hex()[-40:]  # Remove padding
+                            if to_address.lower() == self.account.address.lower():
+                                swap_occurred = True
+                                logger.info(f"Found Transfer event to our address: {to_address}")
+                                break
                 
                 if swap_occurred:
                     logger.info(f"BUY order executed successfully: {tx_hash.hex()}")
                     self.risk_manager.update_trade_metrics(safe_eth_amount)
                     return True, f"Buy order executed: {tx_hash.hex()}"
                 else:
+                    # Additional check: verify PEPE balance increased
+                    try:
+                        await asyncio.sleep(2)  # Wait a bit for blockchain to update
+                        new_pepe_balance = await get_token_balance(PEPE_ADDRESS, self.account.address)
+                        if new_pepe_balance > 0:
+                            logger.info(f"BUY order executed successfully (balance check): {tx_hash.hex()}")
+                            logger.info(f"PEPE balance: {new_pepe_balance}")
+                            self.risk_manager.update_trade_metrics(safe_eth_amount)
+                            return True, f"Buy order executed: {tx_hash.hex()}"
+                    except Exception as balance_error:
+                        logger.warning(f"Balance check failed: {balance_error}")
+                    
                     logger.error(f"Transaction succeeded but NO SWAP OCCURRED: {tx_hash.hex()}")
                     logger.error(f"Gas used: {receipt.gasUsed}, Logs: {len(receipt.logs)}")
                     return False, f"Transaction succeeded but swap failed - no PEPE received: {tx_hash.hex()}"
@@ -271,22 +311,26 @@ class LiveTrader:
             approve_hash = get_w3().eth.send_raw_transaction(raw_approve)
             get_w3().eth.wait_for_transaction_receipt(approve_hash, timeout=300)
             
-            # Build the swap transaction
+            # Build the swap transaction using Uniswap V2 router
             deadline = int((datetime.now() + timedelta(minutes=20)).timestamp())
             
+            # Use swapExactTokensForTokens for PEPE -> ETH (Uniswap V2)
             swap_params = {
-                'tokenIn': PEPE_ADDRESS,
-                'tokenOut': WETH_ADDRESS,
-                'fee': 3000,  # 0.3% fee tier
-                'recipient': self.account.address,
-                'deadline': deadline,
                 'amountIn': get_w3().to_wei(pepe_amount, 'ether'),
-                'amountOutMinimum': get_w3().to_wei(min_eth_amount, 'ether'),
-                'sqrtPriceLimitX96': 0
+                'amountOutMin': get_w3().to_wei(min_eth_amount, 'ether'),
+                'path': [PEPE_ADDRESS, WETH_ADDRESS],  # PEPE -> WETH path
+                'to': self.account.address,
+                'deadline': deadline
             }
             
-            # Build transaction
-            transaction = self.router_contract.functions.exactInputSingle(swap_params).build_transaction({
+            # Build transaction using Uniswap V2 router
+            transaction = self.router_contract.functions.swapExactTokensForTokens(
+                swap_params['amountIn'],
+                swap_params['amountOutMin'],
+                swap_params['path'],
+                swap_params['to'],
+                swap_params['deadline']
+            ).build_transaction({
                 'from': self.account.address,
                 'value': 0,  # No ETH sent for token->token swap
                 'gas': 300000,

@@ -53,7 +53,7 @@ PEPE_WETH_POOL_ADDRESS = "0x11950d141ecb863f01007add7d1a342041227b58" # Uniswap 
 PEPE_WETH_POOL_1PERCENT = "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8" # 1% fee tier 
 PEPE_WETH_POOL_005PERCENT = "0x4e68ccd3e89f51c3074ca5072bbac773960dfa36" # 0.05% fee tier
 
-UNISWAP_ROUTER_ADDRESS = '0xE592427A0AEce92De3Edee1F18F0157Cc0fEf9f2' # Uniswap V3 Router 2
+UNISWAP_ROUTER_ADDRESS = '0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D' # Uniswap V2 Router
 
 # --- Token Addresses (Mainnet) ---
 WETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
@@ -65,10 +65,10 @@ LONG_SMA_WINDOW = 8       # Fast 8-period SMA (was 15)
 RSI_WINDOW = 5            # Fast 5-period RSI (was 7)
 RSI_OVERSOLD = 35         # Buy at RSI 35 (was 25 - less restrictive)
 RSI_OVERBOUGHT = 65       # Sell at RSI 65 (was 75 - less restrictive)
-NUM_HOURS_DATA = 72       # 72 hours data (better for accurate trading signals)
+NUM_HOURS_DATA = 24       # 24 hours data (reduced from 72 for faster startup)
 
 # --- Bot Trading Parameters ---
-TRADE_PERCENTAGE = 0.05  # Reduced from 0.25 to 0.05 (5% of balance instead of 25%)
+TRADE_PERCENTAGE = 0.15  # Increased from 0.05 to 0.15 (15% of balance instead of 5%)
 
 # Note: INITIAL_ETH_BALANCE removed - bot always fetches real wallet balance on startup
 

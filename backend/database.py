@@ -1,7 +1,7 @@
 from sqlalchemy import create_engine, Column, Float, String, DateTime, Boolean, Text, Integer
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from datetime import datetime, UTC # Import UTC
+from datetime import datetime, timezone # Import timezone instead of UTC
 import logging
 
 logger = logging.getLogger(__name__)
@@ -16,7 +16,7 @@ class SimulatedTrade(Base):
     __tablename__ = "simulated_trades"
 
     id = Column(String, primary_key=True, index=True)
-    timestamp = Column(DateTime, default=lambda: datetime.now(UTC)) # Use timezone-aware UTC
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc)) # Use timezone-aware UTC
     signal = Column(String, index=True)
     eth_amount = Column(Float)
     pepe_amount = Column(Float)
@@ -29,7 +29,7 @@ class LiveTrade(Base):
     __tablename__ = "live_trades"
 
     id = Column(String, primary_key=True, index=True)
-    timestamp = Column(DateTime, default=lambda: datetime.now(UTC))
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     signal = Column(String, index=True)
     eth_amount = Column(Float)
     pepe_amount = Column(Float)
@@ -48,13 +48,13 @@ class PortfolioState(Base):
     id = Column(String, primary_key=True, index=True, default="current_state")
     eth_balance = Column(Float)
     pepe_balance = Column(Float)
-    last_updated = Column(DateTime, default=lambda: datetime.now(UTC)) # Use timezone-aware UTC
+    last_updated = Column(DateTime, default=lambda: datetime.now(timezone.utc)) # Use timezone-aware UTC
 
 class TradingSession(Base):
     __tablename__ = "trading_sessions"
 
     id = Column(String, primary_key=True, index=True)
-    start_time = Column(DateTime, default=lambda: datetime.now(UTC))
+    start_time = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     end_time = Column(DateTime, nullable=True)
     mode = Column(String)  # simulation, live
     initial_eth_balance = Column(Float)
@@ -70,7 +70,7 @@ class RiskEvent(Base):
     __tablename__ = "risk_events"
 
     id = Column(String, primary_key=True, index=True)
-    timestamp = Column(DateTime, default=lambda: datetime.now(UTC))
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     event_type = Column(String)  # stop_loss, gas_limit, balance_check, etc.
     severity = Column(String)  # low, medium, high, critical
     description = Column(Text)
@@ -100,8 +100,7 @@ def init_db(initial_eth_balance=None):
         initial_state = PortfolioState(
             id="current_state",
             eth_balance=initial_eth_balance,
-            pepe_balance=0.0,
-            timestamp=datetime.now(UTC)
+            pepe_balance=0.0
         )
         db.add(initial_state)
         db.commit()
