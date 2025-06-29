@@ -13,6 +13,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application code
 COPY . .
 
+# Create data directory if it doesn't exist
+RUN mkdir -p /app/data
+
 # Expose the port the app runs on (no longer strictly needed for backend-only, but good practice)
 EXPOSE 8000
 

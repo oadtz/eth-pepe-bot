@@ -8,7 +8,6 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/app
       - db_data:/app/data # Mount a named volume for database persistence
     env_file:
       - ./.env
